@@ -1,194 +1,131 @@
-<?php
+<?php namespace Tsawler\Laravelfilemanager\controllers;
 
-namespace Unisharp\Laravelfilemanager\controllers;
-
-use Illuminate\Support\Facades\Event;
+use Tsawler\Laravelfilemanager\controllers\Controller;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Input;
-use Lang;
+use Illuminate\Support\Facades\Session;
+use Illuminate\Support\Str;
 use Intervention\Image\Facades\Image;
-use Symfony\Component\HttpFoundation\File\UploadedFile;
-use Unisharp\Laravelfilemanager\Events\ImageIsUploading;
-use Unisharp\Laravelfilemanager\Events\ImageWasUploaded;
 
 /**
  * Class UploadController
- * @package Unisharp\Laravelfilemanager\controllers
+ * @package Tsawler\Laravelfilemanager\controllers
  */
-class UploadController extends LfmController {
-
-    private $default_file_types = ['application/pdf'];
-    private $default_image_types = ['image/jpeg', 'image/png', 'image/gif'];
-    // unit is assumed to be kb
-    private $default_max_file_size = 1000;
-    private $default_max_image_size = 500;
+class UploadController extends Controller {
 
     /**
-     * Receives a request to upload files
+     * @var
+     */
+    protected $file_location;
+
+    /**
+     * @var
+     */
+    protected $allowed_types;
+
+
+    /**
+     * constructor
+     */
+    function __construct()
+    {
+        $this->allowed_types = Config::get('lfm.allowed_file_types');
+
+        if (Session::get('lfm_type') == "Images")
+            $this->file_location = Config::get('lfm.images_dir');
+        else
+            $this->file_location = Config::get('lfm.files_dir');
+    }
+
+
+    /**
+     * Upload an image/file and (for images) create thumbnail
      *
      * @param UploadRequest $request
      * @return string
      */
-    public function upload() {
-
-        try {
-            $res = $this->uploadValidator();
-            if (true !== $res) {
-                return Lang::get('lfm.error-invalid');
-            }
-        } catch (\Exception $e) {
-            return $e->getMessage();
+    public function upload()
+    {
+        // sanity check
+        if ( ! Input::hasFile('file_to_upload'))
+        {
+            // there ws no uploded file
+            return "You must choose a file!";
+            exit;
         }
 
-        $files = Input::file('upload');
 
-        // upload via ckeditor 'Upload' tab
-        if (count($files) == 1 && !Input::has('show_list')) {
-            //if there is only a file and there is no show_list, you return the path of the new file
-            return $this->storeFile($files);
-        }
+        if (Session::get('lfm_type') == "Images")
+        {
+            $file = Input::file('file_to_upload');
+            $working_dir = Input::get('working_dir');
+            $destinationPath = base_path() . "/" . $this->file_location;
 
-        foreach ($files as $file) {
+            $extension = $file->getClientOriginalExtension();
 
-            //when you enter this foreach, the input doesen't have a show_list
-            $this->storeFile($file);
-        }
-
-        return 'OK';
-    }
-
-    /**
-     * Stores a file creates thumbnail
-     * 
-     * @param type $file
-     * @return string
-     */
-    private function storeFile($file) {
-
-        $new_filename = $this->getNewName($file);
-        $dest_path = parent::getPath('directory');
-
-        Event::fire(new ImageIsUploading($dest_path . $new_filename));
-
-        if (File::exists($dest_path . $new_filename)) {
-            return Lang::get('lfm.error-file-exist');
-        }
-
-        //Apply orientation from exif data
-        $img = Image::make($file->getRealPath())->orientate();
-        $upload = $img->save($dest_path . $new_filename, 90);
-
-        if ('Images' === $this->file_type) {
-            $this->makeThumb($dest_path, $new_filename);
-        }
-
-        Event::fire(new ImageWasUploaded(realpath($dest_path . '/' . $new_filename)));
-
-        return $this->useFile($new_filename);
-    }
-
-    private function uploadValidator() {
-        // when uploading a file with the POST named "upload"
-        $expected_file_type = $this->file_type;
-        $is_valid = false;
-        $force_invalid = false;
-
-        $files = Input::file('upload');
-
-        foreach ($files as $file) {
-            if (empty($file)) {
-                throw new \Exception(Lang::get('laravel-filemanager::lfm.error-file-empty'));
-            } elseif (!$file instanceof UploadedFile) {
-                throw new \Exception(Lang::get('laravel-filemanager::lfm.error-instance'));
-            } elseif ($file->getError() == UPLOAD_ERR_INI_SIZE) {
-                $max_size = ini_get('upload_max_filesize');
-                throw new \Exception(Lang::get('laravel-filemanager::lfm.error-file-size', ['max' => $max_size]));
-            } elseif ($file->getError() != UPLOAD_ERR_OK) {
-                dd('File failed to upload. Error code: ' . $file->getError());
+            if(!empty($this->allowed_types["Images"]) && !in_array($extension, $this->allowed_types["Images"]))
+            {
+                return "File type is not allowed!";
+                exit;
             }
 
-            $mimetype = $file->getMimeType();
-
-            // size to kb unit is needed
-            $size = $file->getSize() / 1000;
-
-            if ($expected_file_type === 'Files') {
-                $mine_config = 'lfm.valid_file_mimetypes';
-                $valid_mimetypes = Config::get($mine_config, $this->default_file_types);
-                $max_size = Config::get('lfm.max_file_size', $this->default_max_file_size);
-            } else {
-                $mine_config = 'lfm.valid_image_mimetypes';
-                $valid_mimetypes = Config::get($mine_config, $this->default_image_types);
-                $max_size = Config::get('lfm.max_image_size', $this->default_max_image_size);
+            if (strlen($working_dir) > 1)
+            {
+                $destinationPath .= $working_dir . "/";
             }
 
-            if (!is_array($valid_mimetypes)) {
-                throw new \Exception('Config : ' . $mine_config . ' is not set correctly');
+            $filename = $file->getClientOriginalName();
+
+            $new_filename = Str::slug(str_replace($extension, '', $filename)) . "." . $extension;
+
+            Input::file('file_to_upload')->move($destinationPath, $new_filename);
+
+            if (!File::exists($destinationPath . "thumbs"))
+            {
+                File::makeDirectory($destinationPath . "thumbs");
             }
 
-            if (false === in_array($mimetype, $valid_mimetypes)) {
-                throw new \Exception(Lang::get('laravel-filemanager::lfm.error-mime') . $mimetype);
+            $thumb_img = Image::make($destinationPath . $new_filename);
+            $thumb_img->fit(200, 200)
+                ->save($destinationPath . "thumbs/" . $new_filename);
+            unset($thumb_img);
+
+            return "OK";
+        } else
+        {
+            $file = Input::file('file_to_upload');
+            $working_dir = Input::get('working_dir');
+            $destinationPath = base_path() . "/" . $this->file_location;
+
+            $extension = $file->getClientOriginalExtension();
+
+            if(!empty($this->allowed_types["Files"]) && !in_array($extension, $this->allowed_types["Files"]))
+            {
+                return "File type is not allowed!";
+                exit;
             }
 
-            if ($size > $max_size) {
-                throw new \Exception(Lang::get('laravel-filemanager::lfm.error-size') . $mimetype);
+            if (strlen($working_dir) > 1)
+            {
+                $destinationPath .= $working_dir . "/";
             }
+
+            $filename = $file->getClientOriginalName();
+
+            $new_filename = Str::slug(str_replace($extension, '', $filename)) . "." . $extension;
+
+            if (File::exists($destinationPath . $new_filename))
+            {
+                return "A file with this name already exists!";
+                exit;
+            }
+
+            Input::file('file_to_upload')->move($destinationPath, $new_filename);
+
+            return "OK";
         }
 
-        return true;
-    }
-
-    private function getNewName($file) {
-        $new_filename = trim(pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME));
-
-        // $file_full_name =  $file->getClientOriginalName();
-        // $new_filename = substr($file_full_name,0,strrpos($file_full_name,'.'));
-
-        if (Config::get('lfm.rename_file') === true) {
-            $new_filename = uniqid();
-        } elseif (Config::get('lfm.alphanumeric_filename') === true) {
-            $new_filename = preg_replace('/[^A-Za-z0-9\-\']/', '_', $new_filename);
-        }
-
-        $new_filename = $new_filename . '.' . $file->getClientOriginalExtension();
-
-        return $new_filename;
-    }
-
-    private function makeThumb($dest_path, $new_filename) {
-        $thumb_folder_name = Config::get('lfm.thumb_folder_name');
-
-        if (!File::exists($dest_path . $thumb_folder_name)) {
-            File::makeDirectory($dest_path . $thumb_folder_name);
-        }
-
-        $thumb_img = Image::make($dest_path . $new_filename);
-        $thumb_img->fit(200, 200)
-                ->save($dest_path . $thumb_folder_name . '/' . $new_filename);
-        unset($thumb_img);
-    }
-
-    private function useFile($new_filename) {
-        $file = parent::getUrl('directory') . $new_filename;
-
-        return "<script type='text/javascript'>
-
-        function getUrlParam(paramName) {
-            var reParam = new RegExp('(?:[\?&]|&)' + paramName + '=([^&]+)', 'i');
-            var match = window.location.search.match(reParam);
-            return ( match && match.length > 1 ) ? match[1] : null;
-        }
-
-        var funcNum = getUrlParam('CKEditorFuncNum');
-
-        var par = window.parent,
-            op = window.opener,
-            o = (par && par.CKEDITOR) ? par : ((op && op.CKEDITOR) ? op : false);
-
-        if (op) window.close();
-        if (o !== false) o.CKEDITOR.tools.callFunction(funcNum, '$file');
-        </script>";
     }
 
 }
